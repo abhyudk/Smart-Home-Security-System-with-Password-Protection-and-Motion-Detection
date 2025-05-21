@@ -1,0 +1,248 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2818
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica-Bold;\f1\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww23040\viewh15060\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\b\fs48 \cf0 CODE
+\f1\b0 \
+\
+
+\fs28 #include <LiquidCrystal_I2C.h>\
+#include <Servo.h>\
+#include <Keypad.h>\
+\
+// Pin Definitions\
+const int pirPin = 7;         // PIR sensor pin\
+const int buzzerPin = 3;      // Buzzer pin\
+const int ledPin = 5;         // LED pin\
+const int servoPin = 6;       // Servo pin\
+\
+// Keypad configuration\
+const byte ROW_NUM    = 4;    // four rows\
+const byte COL_NUM    = 4;    // four columns\
+char keys[ROW_NUM][COL_NUM] = \{\
+  \{'1','2','3','A'\},\
+  \{'4','5','6','B'\},\
+  \{'7','8','9','C'\},\
+  \{'*','0','#','D'\}\
+\};\
+byte pin_rows[ROW_NUM] = \{10, 11, 12, 13\};     // Pins for the rows\
+byte pin_column[COL_NUM] = \{A0, A1, A2, A3\};   // Pins for the columns\
+\
+Keypad keypad = Keypad( makeKeymap(keys), pin_rows, pin_column, ROW_NUM, COL_NUM );\
+\
+// LCD Setup (Address 0x27, 16x2 display)\
+LiquidCrystal_I2C lcd(0x27, 16, 2); // 16x2 LCD with I2C communication\
+\
+// Variables\
+Servo doorServo;\
+const int correctPassword = 1234; // Correct password for entry\
+int enteredPassword = 0;\
+int passwordDigitCount = 0;\
+bool isPasswordCorrect = false;\
+bool doorIsOpen = false;       // Door status flag\
+bool motionHandled = false;    // Flag to ensure we only process motion once\
+unsigned long lastMotionTime = 0; // To track the last motion time (for debouncing)\
+unsigned long motionDebounceTime = 2000; // 2 seconds debounce time for motion sensor\
+\
+// State Management\
+bool waitingForPassword = true; // Flag to check if we are waiting for password input\
+enum SystemState \{ WAITING_FOR_PASSWORD, DOOR_OPENED, EXIT_STATE, SYSTEM_READY \};\
+SystemState currentState = WAITING_FOR_PASSWORD; // Start by waiting for password input\
+\
+void setup() \{\
+  // Initialize pins\
+  pinMode(pirPin, INPUT);\
+  pinMode(buzzerPin, OUTPUT);\
+  pinMode(ledPin, OUTPUT);\
+\
+  // Initialize servo\
+  doorServo.attach(servoPin);\
+  doorServo.write(0); // Start with door closed\
+  digitalWrite(buzzerPin, LOW);\
+  digitalWrite(ledPin, LOW);\
+\
+  // Initialize LCD\
+  lcd.init();\
+  lcd.backlight(); // Initialize the LCD with 16 columns, 2 rows\
+  lcd.clear();      // Clear the display\
+  lcd.setCursor(0, 0); // Start cursor at the top left corner\
+  lcd.print("System Ready");\
+\
+  // Start Serial Monitor for debugging\
+  Serial.begin(9600);\
+  Serial.println("System Ready");\
+\}\
+\
+void loop() \{\
+  // Step 1: Password Prompt and Input (Only once)\
+  if (waitingForPassword) \{\
+    promptPassword(); // Always prompt for password only once\
+  \}\
+\
+  // Step 2: If password is correct, immediately open and close the door (servo)\
+  if (isPasswordCorrect && currentState == WAITING_FOR_PASSWORD) \{\
+    currentState = SYSTEM_READY;  // Transition to system ready state\
+    Serial.println("System is ready for entry");\
+    lcd.setCursor(0, 1);\
+    lcd.print("Access Granted");\
+   \
+  \}\
+\
+  // Step 3: Handle Keypad input for password\
+  char key = keypad.getKey();\
+  if (key) \{\
+    Serial.print("Key pressed: ");\
+    Serial.println(key);\
+\
+    if (key >= '0' && key <= '9' && passwordDigitCount < 4) \{\
+      enteredPassword = enteredPassword * 10 + (key - '0');\
+      passwordDigitCount++;\
+      lcd.setCursor(passwordDigitCount - 1, 1); // Move cursor to password digit position\
+      lcd.print("*"); // Mask password input for security\
+    \}\
+\
+    // If 4 digits have been entered, check if it's correct\
+    if (passwordDigitCount == 4) \{\
+      if (enteredPassword == correctPassword) \{\
+        Serial.println("\\nAccess Granted");\
+        lcd.clear();\
+        lcd.setCursor(0, 0);\
+        lcd.print("Access Granted");\
+        isPasswordCorrect = true; // Grant access and open door\
+        enteredPassword = 0;\
+        passwordDigitCount = 0;\
+        waitingForPassword = false; // Stop waiting for password\
+        openAndCloseDoor(); // Open and close the door immediately after correct password\
+      \} else \{\
+        Serial.println("\\nAccess Denied");\
+        lcd.clear();\
+        lcd.setCursor(0, 0);\
+        lcd.print("Access Denied");\
+        enteredPassword = 0;\
+        passwordDigitCount = 0;\
+        lcd.setCursor(0, 1);\
+        lcd.print("Enter Password:");\
+      \}\
+    \}\
+  \}\
+\
+  // Step 4: Handle PIR motion sensor and actions\
+  if (digitalRead(pirPin) == HIGH) \{ // PIR sensor detects motion\
+    unsigned long currentTime = millis();\
+\
+    // Only process the motion if it hasn't been processed recently (debounce)\
+    if (!motionHandled && currentTime - lastMotionTime > motionDebounceTime) \{\
+      lastMotionTime = currentTime; // Update last motion time\
+      motionHandled = true; // Mark motion as handled\
+\
+      Serial.println("Motion detected!");\
+      lcd.clear();\
+      lcd.setCursor(0, 0);\
+      lcd.print("Motion Detected");\
+\
+      // Step 5: If the password was incorrect and motion is detected, trigger buzzer\
+      if (!isPasswordCorrect) \{\
+        digitalWrite(buzzerPin, HIGH);  // Turn on the buzzer\
+        delay(1000);                    // Buzzer beeps for 1 second\
+        digitalWrite(buzzerPin, LOW);   // Turn off the buzzer\
+      \}\
+\
+      // Step 6: Handle entry and exit states based on the system state\
+      if (currentState == SYSTEM_READY) \{\
+        // Entry detected but don't open the door if the system is in entry mode\
+        digitalWrite(ledPin, HIGH); // LED ON (Entry)\
+        currentState = DOOR_OPENED;\
+        Serial.println("You have entered. Light ON.");\
+        lcd.clear();\
+        lcd.setCursor(0, 0);\
+        lcd.print("You Have Entered");\
+      \} \
+      else if (currentState == DOOR_OPENED) \{\
+        // Exit detected: Turn off LED, close the door, and reset system\
+        digitalWrite(ledPin, LOW); // LED OFF (Exit)\
+        Serial.println("LED OFF (Exit)");\
+        // Open and close the door (same as entry)\
+        openAndCloseDoor();\
+        currentState = WAITING_FOR_PASSWORD; // Reset to password input state\
+        Serial.println("Exit complete. Please enter password again.");\
+        isPasswordCorrect = false; // Reset password\
+        waitingForPassword = true; // Start waiting for password again\
+        lcd.clear();\
+        lcd.setCursor(0, 0);\
+        lcd.print("Please Enter Password");\
+      \}\
+    \}\
+  \} else \{\
+    // Reset motionHandled flag if PIR sensor stops detecting motion\
+    motionHandled = false;\
+  \}\
+\
+  delay(100); // Small delay for stability\
+\}\
+\
+// Function to prompt for password and verify\
+void promptPassword() \{\
+  lcd.setCursor(0, 0);  // Set cursor to the first line\
+  lcd.print("Enter Password:"); // Prompt message\
+\}\
+\
+// Function to open and close the door (move servo to 90 degrees and back)\
+void openAndCloseDoor() \{\
+  doorServo.write(90); // Open the door (servo to 90 degrees)\
+  delay(1000);          // Wait for door to open\
+  doorServo.write(0);   // Close the door (servo to 0 degrees)\
+  delay(1000);          // Wait for door to close\
+\}\
+\
+\
+\
+
+\f0\b\fs48 \
+COONECTIONS\
+\
+\
+
+\f1\b0\fs28 PIR Sensor:\
+\
+VCC of PIR sensor \uc0\u8594  5V pin on Arduino\
+GND of PIR sensor \uc0\u8594  GND pin on Arduino\
+OUT of PIR sensor \uc0\u8594  Pin 7 on Arduino (configured as pirPin in code)\
+Buzzer:\
+\
+Positive terminal of the buzzer \uc0\u8594  Pin 3 on Arduino (configured as buzzerPin in code)\
+Negative terminal of the buzzer \uc0\u8594  GND pin on Arduino\
+LED:\
+\
+Positive terminal of the LED \uc0\u8594  Pin 5 on Arduino (configured as ledPin in code)\
+Negative terminal of the LED \uc0\u8594  GND pin on Arduino\
+Use a current-limiting resistor (220\uc0\u937  to 1k\u937 ) in series with the LED for safe operation.\
+Servo Motor:\
+\
+Red wire (VCC) of the servo \uc0\u8594  5V pin on Arduino\
+Black or Brown wire (GND) of the servo \uc0\u8594  GND pin on Arduino\
+Control wire (Signal) of the servo \uc0\u8594  Pin 6 on Arduino (configured as servoPin in code)\
+\
+\
+\
+Keypad Wiring:\
+Row 1 (R1) -> Pin 10\
+Row 2 (R2) -> Pin 11\
+Row 3 (R3) -> Pin 12\
+Row 4 (R4) -> Pin 13\
+Column 1 (C1) -> Pin A0\
+Column 2 (C2) -> Pin A1\
+Column 3 (C3) -> Pin A2\
+Column 4 (C4) -> Pin A3\
+\
+\
+VCC (LCD) \uc0\u8594  5V (Arduino): This powers the LCD.\
+GND (LCD) \uc0\u8594  GND (Arduino): This completes the circuit ground.\
+SDA (LCD) \uc0\u8594  A4 (Arduino): This is the I2C data line.\
+SCL (LCD) \uc0\u8594  A5 (Arduino): This is the I2C clock line.\
+\
+
+\fs48 \
+}
